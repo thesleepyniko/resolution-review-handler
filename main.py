@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 import os
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 import httpx
 
 load_dotenv()
@@ -14,11 +15,26 @@ load_dotenv()
 # so a __name__ logger would fall through to logging.lastResort (bare stderr, no level/timestamp)
 logger = logging.getLogger("uvicorn.error")
 
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 ARI_SIGNING_SECRET = os.environ.get("ARI_SIGNING_SECRET") or ""
 ARI_WEBHOOK_URL = os.environ.get("ARI_WEBHOOK_URL") or ""
 AIRTABLE_SECRET = os.environ.get("AIRTABLE_SECRET") or ""
+
+
+# in middleware rather than the handler so unauthenticated requests are rejected before the
+# body is read; fastapi validates the payload before handler code runs, so a junk request
+# would otherwise get a 422 that maps the schema
+@app.middleware("http")
+async def require_airtable_token(request: Request, call_next):
+    token = request.headers.get("airtable-token")
+    if (
+        not AIRTABLE_SECRET
+        or not token
+        or not hmac.compare_digest(token.encode(), AIRTABLE_SECRET.encode())
+    ):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 # these should be what airtable sends
@@ -98,20 +114,8 @@ class IncomingSubmission(BaseModel):
         )
 
 
-@app.post("/update")
-def handle_project_update(
-    submission: IncomingSubmission,
-    airtable_token: Annotated[str | None, Header()] = None,
-):
-    # make sure that it's actually airtable making the req and not somebody else.
-    # AIRTABLE_SECRET must be non-empty and match via constant-time compare, otherwise
-    # an unset secret (or a missing header) would let the check pass by accident.
-    if (
-        not AIRTABLE_SECRET
-        or not airtable_token
-        or not hmac.compare_digest(airtable_token.encode(), AIRTABLE_SECRET.encode())
-    ):
-        raise HTTPException(401)
+@app.post("/ari-ship-relay")
+def handle_project_update(submission: IncomingSubmission):
     # try:
     #     extracted_repo_url = tldextract.extract(submission.repo_url)
     #     if extracted_repo_url.top_domain_under_public_suffix != "github.com"
