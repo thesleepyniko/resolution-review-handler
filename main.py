@@ -78,7 +78,16 @@ class IncomingSubmission(BaseModel):
     repo_url: str = Field(min_length=1, max_length=2000)
     demo_url: str = Field(min_length=1, max_length=2000)
     thumbnail_url: str = Field(min_length=1, max_length=2000)
-    hackatime_projects: list[Annotated[str, Field(max_length=200)]] = Field(max_length=50)
+    # optional: program hours alone are enough evidence (see require_evidence)
+    hackatime_projects: list[Annotated[str, Field(max_length=200)]] = Field(
+        default_factory=list, max_length=50
+    )
+
+    @field_validator("hackatime_projects", mode="before")
+    @classmethod
+    def null_projects_to_empty(cls, projects):
+        # airtable may send null for an empty field
+        return [] if projects is None else projects
 
     @field_validator("hackatime_projects")
     @classmethod
