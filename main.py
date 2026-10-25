@@ -3,10 +3,11 @@ import hashlib
 import logging
 from dotenv import load_dotenv
 import os
+import time
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import httpx
 
 load_dotenv()
@@ -72,7 +73,9 @@ class IncomingSubmission(BaseModel):
     maker_name: str = Field(min_length=1, max_length=200)
     maker_slack_id: str = Field(min_length=1, max_length=50)
     maker_hackatime_id: str | None = Field(default=None, max_length=100)
-    maker_program_hours: float | None = Field(default=None, ge=0)
+    maker_program_hours: float | None = Field(
+        default=None, ge=0, le=1000, allow_inf_nan=False
+    )
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=2000)
     repo_url: str = Field(min_length=1, max_length=2000)
@@ -135,27 +138,38 @@ def handle_project_update(submission: IncomingSubmission):
         raise HTTPException(500)
 
     raw = ari_submission.model_dump_json(exclude_none=True).encode("utf-8")
+    timestamp = str(int(time.time()))
 
     raw_signed = hmac.new(
         ARI_SIGNING_SECRET.encode(),
-        raw,
+        timestamp.encode() + b"." + raw,
         hashlib.sha256
     ).hexdigest()
 
     try:
-        request = httpx.post(
+        response = httpx.post(
             ARI_WEBHOOK_URL,
             content=raw,
             headers = {
                 "Content-Type": "application/json",
+                "X-Ari-Timestamp": timestamp,
                 "X-Ari-Signature": raw_signed
             },
             timeout=10.0
         )
-        request.raise_for_status()
-    except Exception:
+        # These rejections require a correction, not a retry. In particular, never
+        # withdraw an open ship automatically just because a resend gets a 409.
+        if response.status_code not in (409, 422):
+            response.raise_for_status()
+    except httpx.HTTPError:
         logger.exception("failed to forward submission %s to Ari", ari_submission.external_id)
         raise HTTPException(502, detail="failed to forward submission to Ari")
+
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        media_type=response.headers.get("content-type", "application/json"),
+    )
         
 
 
